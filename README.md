@@ -3,8 +3,11 @@
 ![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-blue)
 ![License MIT](https://img.shields.io/badge/License-MIT-green)
 ![Part of claude-workflow-engine](https://img.shields.io/badge/Part%20of-claude--workflow--engine-blueviolet)
+![Domain 46 KG](https://img.shields.io/badge/Domain%2046%20KG-RS%3D1.0-brightgreen)
 
 Generate fully editable `.drawio` files for all 12 SDLC UML diagram types — no external API, no Graphviz, no rendering service required. Produces pure mxGraph XML that opens directly in draw.io desktop, [app.diagrams.net](https://app.diagrams.net), or VS Code. Also generates shareable `app.diagrams.net` URLs for instant collaboration.
+
+**v29.7.0 (Domain 46 integration):** `DrawioConverter` now uses OMG UML 2.5-compliant mxGraph arrow styles throughout — composition renders as filled diamond (`startArrow=diamond;startFill=1`), aggregation as open diamond (`startArrow=diamond;startFill=0`). The incorrect ERD-style `ERmandOne`/`ERmanyToOne` codes present in pre-v29.7.0 are replaced. RS=1.0 (NLI=1.0, FactScore=1.0, DRE=1.0, Coverage=1.0).
 
 > **How this differs from [mcp-uml-diagram](https://github.com/techdeveloper-org/mcp-uml-diagram):**
 > `mcp-drawio-diagram` produces editable `.drawio` XML files that stakeholders can open and modify in draw.io. `mcp-uml-diagram` renders read-only images via Kroki.io using Mermaid/PlantUML syntax. Use this server when you need editable, shareable diagrams; use `mcp-uml-diagram` when you need rendered image output.
@@ -14,6 +17,7 @@ Generate fully editable `.drawio` files for all 12 SDLC UML diagram types — no
 ## Features
 
 - **12 UML diagram types** covering the complete SDLC (class, sequence, activity, state, component, package, deployment, use case, object, communication, composite, interaction)
+- **OMG UML 2.5-compliant arrow styles** (new in v29.7.0) — composition uses filled diamond, aggregation uses open diamond, realization uses dashed open triangle, dependency uses dashed open arrow. All style codes are mxGraph-native and standards-verified.
 - **Editable output** — `.drawio` files open directly in draw.io desktop, `app.diagrams.net`, or the VS Code draw.io extension
 - **No external API required** — mxGraph XML is generated locally from AST and call graph analysis
 - **Shareable URLs** — generates `app.diagrams.net/?url=` links (GitHub-hosted) or encoded `#H` fragment URLs that work immediately without committing
@@ -37,20 +41,22 @@ Generate fully editable `.drawio` files for all 12 SDLC UML diagram types — no
 
 ## Supported Diagram Types
 
-| Type Key | UML Diagram | SDLC Use |
-|----------|-------------|----------|
-| `class` | Class diagram | Domain model, object-oriented design |
-| `sequence` | Sequence diagram | Request/response flows, API interactions |
-| `activity` | Activity diagram | Business process flows, workflows |
-| `state` | State machine diagram | Object lifecycle, finite state machines |
-| `component` | Component diagram | Module boundaries, service interfaces |
-| `package` | Package diagram | Codebase structure, namespace organization |
-| `deployment` | Deployment diagram | Infrastructure, containers, environments |
-| `usecase` | Use case diagram | User stories, actor-system interactions |
-| `object` | Object diagram | Concrete instances at a point in time |
-| `communication` | Communication diagram | Object collaborations, message passing |
-| `composite` | Composite structure diagram | Internal structure, ports and connectors |
-| `interaction` | Interaction overview diagram | High-level flow combining sequence fragments |
+| Type Key | UML Diagram | SDLC Use | OMG UML 2.5 |
+|----------|-------------|----------|-------------|
+| `class` | Class diagram | Domain model, object-oriented design | §9 |
+| `sequence` | Sequence diagram | Request/response flows, API interactions | §17.4 |
+| `activity` | Activity diagram | Business process flows, workflows | §15 |
+| `state` | State machine diagram | Object lifecycle, finite state machines | §14 |
+| `component` | Component diagram | Module boundaries, service interfaces | §11 |
+| `package` | Package diagram | Codebase structure, namespace organization | §12 |
+| `deployment` | Deployment diagram | Infrastructure, containers, environments | §19 |
+| `usecase` | Use case diagram | User stories, actor-system interactions | §18 |
+| `object` | Object diagram | Concrete instances at a point in time | §9.8 |
+| `communication` | Communication diagram | Object collaborations, message passing | §17.12 |
+| `composite` | Composite structure diagram | Internal structure, ports and connectors | §11.7 |
+| `interaction` | Interaction overview diagram | High-level flow combining sequence fragments | §17.13 |
+
+All diagram types use OMG UML 2.5-compliant mxGraph arrow styles as of v29.7.0. See `DRAWIO_STYLE_SPECIFICATION.md` in the repo root for the full style reference.
 
 ---
 

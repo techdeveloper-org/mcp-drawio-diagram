@@ -1,21 +1,24 @@
-"""
-Draw.io Diagram MCP Server - Generate editable .drawio files for all SDLC diagrams.
+# -*- coding: ascii -*-
+"""Draw.io Diagram MCP Server - Generate editable .drawio files for all SDLC diagrams.
 
 No external API required. draw.io files are pure XML (mxGraph format).
-All 12 UML diagram types + call graph supported.
+14 UML diagram types supported (extended from 12 with "timing" and "call_graph_rich").
 
 Tools:
-    generate_drawio_diagram    - Single diagram as .drawio file
-    generate_all_drawio        - All 12 diagram types as .drawio files
+    generate_drawio_diagram    - Single diagram as .drawio file (+3 new params)
+    generate_all_drawio        - All 14 diagram types as .drawio files (was 12)
     get_shareable_url          - app.diagrams.net shareable URL for a .drawio file
     list_drawio_diagrams       - List existing .drawio files in output dir
     convert_mermaid_to_drawio  - Convert existing Mermaid .md to .drawio (best-effort)
+
+Python 3.8+ only. ASCII-only source (cp1252 safe on Windows).
+Backward compatibility: generate_drawio_diagram(type, path) is identical to pre-integration.
 """
 
 import sys
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-# Path setup
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from mcp.server.fastmcp import FastMCP
@@ -26,31 +29,75 @@ mcp = FastMCP(
     instructions=(
         "Generate editable draw.io (.drawio) diagrams for all SDLC UML types. "
         "Files can be opened in draw.io desktop, app.diagrams.net, or VS Code. "
-        "Produces shareable URLs (app.diagrams.net) for collaboration."
+        "Produces shareable URLs (app.diagrams.net) for collaboration. "
+        "Supports rich style mode with complexity-based color coding (use_rich_styles=True)."
     ),
 )
 
+try:
+    from skill_context import get_skill_context, get_domain_context
+    _SKILL_CONTEXT_AVAILABLE = True
+except ImportError:
+    _SKILL_CONTEXT_AVAILABLE = False
 
-# ---- helpers ----------------------------------------------------------
+try:
+    from kg_router import select_diagram_type as _kg_select_diagram_type
+    _KG_ROUTER_AVAILABLE = True
+except ImportError:
+    _KG_ROUTER_AVAILABLE = False
+
+if not _SKILL_CONTEXT_AVAILABLE:
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "skill_context not importable. Domain 46 enrichment unavailable. "
+        "Set GLOBAL_LIBRARY_PATH env var to enable."
+    )
+
+DIAGRAM_TYPES_EXTENDED = [
+    "class", "sequence", "activity", "state",
+    "component", "package", "deployment", "usecase",
+    "object", "communication", "composite", "interaction",
+    "timing",
+    "call_graph_rich",
+]
+
 
 def _scripts_dir():
+    """Return the scripts directory Path for langgraph_engine imports.
+
+    Returns:
+        Path to the scripts directory three levels above this file.
+    """
     return Path(__file__).resolve().parent.parent.parent / "scripts"
 
 
 def _ensure_scripts_path():
+    """Insert scripts_dir into sys.path if not already present."""
     sd = str(_scripts_dir())
     if sd not in sys.path:
         sys.path.insert(0, sd)
 
 
 def _get_converter():
+    """Lazy import and return a DrawioConverter instance.
+
+    Returns:
+        DrawioConverter instance from langgraph_engine.diagrams.drawio_converter.
+    """
     _ensure_scripts_path()
     from langgraph_engine.diagrams.drawio_converter import DrawioConverter
     return DrawioConverter()
 
 
 def _get_ast_analyzer(project_path):
-    """Load AST analysis data from the project."""
+    """Load AST analysis data from the project via UMLAstAnalyzer.
+
+    Args:
+        project_path: Root path of the project to analyze.
+
+    Returns:
+        Dict of analysis data, or {} on any error.
+    """
     _ensure_scripts_path()
     try:
         from langgraph_engine.diagrams.ast_analyzer import UMLAstAnalyzer
@@ -61,7 +108,14 @@ def _get_ast_analyzer(project_path):
 
 
 def _get_call_graph_data(project_path):
-    """Load call graph data as analysis_data dict."""
+    """Load call graph data as analysis_data dict via CallGraphBuilder.
+
+    Args:
+        project_path: Root path of the project to analyze.
+
+    Returns:
+        Dict with "classes" key, or {} on any error.
+    """
     _ensure_scripts_path()
     try:
         from langgraph_engine.call_graph_builder import CallGraphBuilder
@@ -78,20 +132,27 @@ def _get_call_graph_data(project_path):
                     cls_name = Path(file_part).stem
             else:
                 cls_name = fqn
-            # Deduplicate
             existing = next((c for c in classes if c["name"] == cls_name), None)
             if not existing:
                 existing = {"name": cls_name, "methods": [], "attributes": [], "bases": []}
                 classes.append(existing)
             method_name = info.get("method", fqn.split(".")[-1] if "." in fqn else fqn)
-            existing["methods"].append({"name": method_name, "visibility": "+"})
+            existing["methods"].append({"name": method_name, "visibility": "+", "complexity": 0})
         return {"classes": classes}
     except Exception:
         return {}
 
 
 def _resolve_output_dir(project_path, output_dir):
-    """Return absolute Path for output_dir."""
+    """Return absolute Path for output_dir, creating it if needed.
+
+    Args:
+        project_path: Root path of the project.
+        output_dir: Directory path, relative to project_path or absolute.
+
+    Returns:
+        Resolved absolute Path object (created if not exists).
+    """
     od = Path(output_dir)
     if not od.is_absolute():
         od = Path(project_path) / od
@@ -100,14 +161,69 @@ def _resolve_output_dir(project_path, output_dir):
 
 
 def _save_drawio(xml_content, output_path):
-    """Write XML to a .drawio file."""
+    """Write XML to a .drawio file using UTF-8 encoding.
+
+    Args:
+        xml_content: mxGraph XML string to write.
+        output_path: Absolute path for the output file.
+
+    Returns:
+        Absolute path string of the written file.
+    """
     with open(str(output_path), "w", encoding="utf-8") as f:
         f.write(xml_content)
     return str(output_path)
 
 
+def _build_rich_style_config(complexity_threshold_low, complexity_threshold_high):
+    """Build a style_config dict from RICH_STYLE_CONFIG with threshold overrides.
+
+    Attempts to import RICH_STYLE_CONFIG from drawio_converter_enriched.
+    Falls back to a minimal inline config if the module is unavailable.
+
+    Args:
+        complexity_threshold_low: Override for complexity_threshold_low in config.
+        complexity_threshold_high: Override for complexity_threshold_high in config.
+
+    Returns:
+        Dict with style configuration, or None if construction fails.
+    """
+    try:
+        from drawio_converter_enriched import RICH_STYLE_CONFIG
+        cfg = dict(RICH_STYLE_CONFIG)
+        cfg["complexity_threshold_low"] = complexity_threshold_low
+        cfg["complexity_threshold_high"] = complexity_threshold_high
+        return cfg
+    except ImportError:
+        pass
+
+    return {
+        "colors": {
+            "public":    "#FFFFFF",
+            "private":   "#FFE6E6",
+            "protected": "#FFFACD",
+            "interface": "#DAE8FC",
+            "abstract":  "#F8CECC",
+            "enum":      "#D5E8D4",
+        },
+        "complexity_colors": {
+            "low":    "#FFFFFF",
+            "medium": "#FFF2CC",
+            "high":   "#FF0000",
+        },
+        "complexity_threshold_low":  complexity_threshold_low,
+        "complexity_threshold_high": complexity_threshold_high,
+        "show_stereotypes":  True,
+        "show_cardinality":  True,
+        "arrow_style":       "uml",
+        "use_swimlanes":     True,
+        "max_styled_nodes":  200,
+    }
+
+
 # ======================================================================
-# Tool 1: generate_drawio_diagram
+# Tool 1: generate_drawio_diagram (MODIFIED -- 3 new params with defaults)
+# Backward compat: generate_drawio_diagram(type, path) identical to pre-integration.
 # ======================================================================
 
 @mcp.tool()
@@ -118,48 +234,66 @@ def generate_drawio_diagram(
     output_dir: str = "docs/drawio",
     github_repo: str = "",
     github_branch: str = "main",
+    use_rich_styles: bool = False,
+    complexity_threshold_low: int = 2,
+    complexity_threshold_high: int = 4,
 ) -> dict:
     """Generate a single UML diagram as an editable .drawio file.
 
     Analyzes the project with AST/CallGraph and produces a draw.io XML file
-    that can be opened directly in draw.io, app.diagrams.net, or VS Code
-    with the draw.io extension.
+    openable in draw.io desktop, app.diagrams.net, or VS Code draw.io extension.
+
+    Extended from pre-integration with optional rich style support and two
+    new diagram types. When use_rich_styles=False (default), output is
+    byte-identical to pre-integration behavior (backward-compatible guarantee).
 
     Args:
         diagram_type: One of: class, sequence, activity, state, component,
                       package, deployment, usecase, object, communication,
-                      composite, interaction.
+                      composite, interaction, timing, call_graph_rich.
+                      [Extended from 12 to 14 types in Domain 46 integration]
         project_path: Root path of the project to analyze.
         output_dir: Output directory (relative to project root, or absolute).
                     Default: docs/drawio
         github_repo: Optional "owner/repo" for shareable GitHub URL.
                      E.g. "techdeveloper-org/claude-workflow-engine"
         github_branch: Branch for GitHub raw URL. Default: "main"
+        use_rich_styles: When True, apply complexity-based color coding via
+                         RICH_STYLE_CONFIG. Default False = backward-compatible
+                         pre-integration behavior (style_config=None path).
+        complexity_threshold_low: Methods with cyclomatic complexity below
+                                   this value receive white fill. Default 2.
+        complexity_threshold_high: Methods at or above this value receive
+                                    red fill. Default 4.
 
     Returns:
-        dict with output_file, shareable_url, diagram_type, file_size_bytes.
+        dict with output_file, shareable_url, diagram_type, file_size_bytes,
+        open_hint, rich_styles_applied (bool, additive new key).
     """
     _ensure_scripts_path()
     from langgraph_engine.diagrams.drawio_converter import DrawioConverter, get_shareable_url
 
-    # Get analysis data
+    style_config = None
+    if use_rich_styles:
+        style_config = _build_rich_style_config(
+            complexity_threshold_low, complexity_threshold_high
+        )
+
     analysis_data = _get_ast_analyzer(project_path)
     if not analysis_data.get("classes"):
         analysis_data = _get_call_graph_data(project_path)
 
     converter = DrawioConverter()
-    xml = converter.convert(diagram_type, analysis_data)
+    xml = converter.convert(diagram_type, analysis_data, style_config)
 
     od = _resolve_output_dir(project_path, output_dir)
     filename = "%s-diagram.drawio" % diagram_type
     out_path = od / filename
     _save_drawio(xml, out_path)
 
-    # Shareable URL
     github_raw_url = ""
     if github_repo:
         rel = str(out_path).replace("\\", "/")
-        # Try to make relative path from project_path
         try:
             rel = str(out_path.relative_to(Path(project_path))).replace("\\", "/")
         except ValueError:
@@ -181,11 +315,12 @@ def generate_drawio_diagram(
             "Open in: draw.io desktop, https://app.diagrams.net, "
             "or VS Code draw.io extension"
         ),
+        "rich_styles_applied": use_rich_styles and style_config is not None,
     }
 
 
 # ======================================================================
-# Tool 2: generate_all_drawio
+# Tool 2: generate_all_drawio (MODIFIED -- DIAGRAM_TYPES extended to 14)
 # ======================================================================
 
 @mcp.tool()
@@ -196,11 +331,15 @@ def generate_all_drawio(
     github_repo: str = "",
     github_branch: str = "main",
 ) -> dict:
-    """Generate ALL 12 SDLC UML diagram types as editable .drawio files.
+    """Generate ALL 14 SDLC UML diagram types as editable .drawio files.
 
-    Analyzes the project once and produces 12 .drawio files covering the
+    Analyzes the project once and produces 14 .drawio files covering the
     complete SDLC: class, sequence, activity, state, component, package,
-    deployment, use case, object, communication, composite, interaction.
+    deployment, use case, object, communication, composite, interaction,
+    timing (NEW), call_graph_rich (NEW).
+
+    Extended from 12 to 14 diagram types in Domain 46 integration.
+    Existing 12 diagram outputs are byte-identical to pre-integration.
 
     Args:
         project_path: Root path of the project to analyze.
@@ -210,16 +349,10 @@ def generate_all_drawio(
 
     Returns:
         dict with generated list (diagram_type, file, url per diagram),
-        output_dir, and total count.
+        output_dir, total count, and failed list.
     """
     _ensure_scripts_path()
     from langgraph_engine.diagrams.drawio_converter import DrawioConverter, get_shareable_url
-
-    DIAGRAM_TYPES = [
-        "class", "sequence", "activity", "state",
-        "component", "package", "deployment", "usecase",
-        "object", "communication", "composite", "interaction",
-    ]
 
     analysis_data = _get_ast_analyzer(project_path)
     if not analysis_data.get("classes"):
@@ -231,7 +364,7 @@ def generate_all_drawio(
     generated = []
     failed = []
 
-    for dtype in DIAGRAM_TYPES:
+    for dtype in DIAGRAM_TYPES_EXTENDED:
         try:
             xml = converter.convert(dtype, analysis_data)
             filename = "%s-diagram.drawio" % dtype
@@ -275,7 +408,7 @@ def generate_all_drawio(
 
 
 # ======================================================================
-# Tool 3: get_shareable_url
+# Tool 3: get_shareable_url -- UNCHANGED
 # ======================================================================
 
 @mcp.tool()
@@ -290,8 +423,7 @@ def get_shareable_url(
 
     Two URL modes:
         GitHub URL (recommended): If github_repo is provided and the file
-            is committed, returns a ?url= link. Anyone with the link can
-            view and edit the diagram.
+            is committed, returns a ?url= link.
         Encoded URL: Falls back to encoding the XML directly in the URL
             fragment (#H). Works offline but URL is very long.
 
@@ -347,7 +479,7 @@ def get_shareable_url(
 
 
 # ======================================================================
-# Tool 4: list_drawio_diagrams
+# Tool 4: list_drawio_diagrams (MODIFIED -- supported_types extended to 14)
 # ======================================================================
 
 @mcp.tool()
@@ -357,6 +489,9 @@ def list_drawio_diagrams(
     output_dir: str = "docs/drawio",
 ) -> dict:
     """List all existing .drawio diagram files in the output directory.
+
+    Returns the supported_types list extended to 14 types (was 12) to include
+    "timing" and "call_graph_rich" added in Domain 46 integration.
 
     Args:
         project_path: Root path of the project.
@@ -381,16 +516,12 @@ def list_drawio_diagrams(
         "output_dir": str(od),
         "files": files,
         "total": len(files),
-        "supported_types": [
-            "class", "sequence", "activity", "state", "component",
-            "package", "deployment", "usecase", "object",
-            "communication", "composite", "interaction",
-        ],
+        "supported_types": DIAGRAM_TYPES_EXTENDED,
     }
 
 
 # ======================================================================
-# Tool 5: convert_mermaid_to_drawio
+# Tool 5: convert_mermaid_to_drawio -- UNCHANGED
 # ======================================================================
 
 @mcp.tool()
@@ -408,7 +539,7 @@ def convert_mermaid_to_drawio(
     using the same project analysis. Useful for converting an existing Mermaid
     workflow to draw.io without re-running the full pipeline.
 
-    Note: The Mermaid text itself is not parsed - instead the project is
+    Note: The Mermaid text itself is not parsed -- instead the project is
     re-analyzed to produce equivalent draw.io diagrams.
 
     Args:
@@ -425,22 +556,28 @@ def convert_mermaid_to_drawio(
     from langgraph_engine.diagrams.drawio_converter import DrawioConverter, get_shareable_url
 
     MERMAID_TYPE_MAP = {
-        "class-diagram": "class",
-        "sequence-diagram": "sequence",
-        "activity-diagram": "activity",
-        "state-diagram": "state",
-        "component-diagram": "component",
-        "package-diagram": "package",
-        "deployment-diagram": "deployment",
-        "use-case-diagram": "usecase",
-        "object-diagram": "object",
-        "communication-diagram": "communication",
-        "composite-structure-diagram": "composite",
+        "class-diagram":                "class",
+        "sequence-diagram":             "sequence",
+        "activity-diagram":             "activity",
+        "state-diagram":                "state",
+        "component-diagram":            "component",
+        "package-diagram":              "package",
+        "deployment-diagram":           "deployment",
+        "use-case-diagram":             "usecase",
+        "object-diagram":               "object",
+        "communication-diagram":        "communication",
+        "composite-structure-diagram":  "composite",
         "interaction-overview-diagram": "interaction",
-        "call-graph-diagram": "class",  # repurpose call graph as class view
+        "call-graph-diagram":           "class",
+        "timing-diagram":               "timing",
+        "uml-from-code-diagram":        "class",
     }
 
-    uml_path = Path(project_path) / uml_dir if not Path(uml_dir).is_absolute() else Path(uml_dir)
+    uml_path = (
+        Path(project_path) / uml_dir
+        if not Path(uml_dir).is_absolute()
+        else Path(uml_dir)
+    )
     analysis_data = _get_ast_analyzer(project_path)
     if not analysis_data.get("classes"):
         analysis_data = _get_call_graph_data(project_path)
@@ -452,7 +589,7 @@ def convert_mermaid_to_drawio(
     skipped = []
 
     for md_file in sorted(uml_path.glob("*-diagram.md")):
-        stem = md_file.stem  # e.g. "class-diagram"
+        stem = md_file.stem
         dtype = MERMAID_TYPE_MAP.get(stem)
         if not dtype:
             skipped.append({"file": str(md_file), "reason": "unknown type"})
