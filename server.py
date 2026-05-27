@@ -15,6 +15,10 @@ Python 3.8+ only. ASCII-only source (cp1252 safe on Windows).
 Backward compatibility: generate_drawio_diagram(type, path) is identical to pre-integration.
 """
 
+import datetime as _datetime
+import json as _json
+import logging as _logging
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -39,6 +43,10 @@ try:
     _SKILL_CONTEXT_AVAILABLE = True
 except ImportError:
     _SKILL_CONTEXT_AVAILABLE = False
+    _logging.getLogger(__name__).warning(
+        "skill_context not importable. Domain 46 enrichment unavailable. "
+        "Set GLOBAL_LIBRARY_PATH env var to enable."
+    )
 
 try:
     from kg_router import select_diagram_type as _kg_select_diagram_type
@@ -46,12 +54,36 @@ try:
 except ImportError:
     _KG_ROUTER_AVAILABLE = False
 
-if not _SKILL_CONTEXT_AVAILABLE:
-    import logging as _logging
-    _logging.getLogger(__name__).warning(
-        "skill_context not importable. Domain 46 enrichment unavailable. "
-        "Set GLOBAL_LIBRARY_PATH env var to enable."
-    )
+_DRAWIO_MAX_SIZE_BYTES = int(os.environ.get("DRAWIO_MAX_FILE_SIZE_KB", "2048")) * 1024
+_DRAWIO_SHARE = os.environ.get("DRAWIO_SHARE", "0") == "1"
+
+_AUDIT_LOG_ENABLED = os.environ.get("ENABLE_AUDIT_LOG", "0") == "1"
+_AUDIT_LOGGER = _logging.getLogger("drawio_diagram.audit")
+
+
+def _audit(tool_name, params):
+    # type: (str, dict) -> None
+    """Log a structured audit entry when ENABLE_AUDIT_LOG=1.
+
+    Emits a single-line JSON record to the drawio_diagram.audit logger at INFO
+    level. Suppresses all exceptions silently so audit failures never interrupt
+    tool execution. Set ENABLE_AUDIT_LOG=1 environment variable to activate.
+
+    Args:
+        tool_name: MCP tool name being invoked.
+        params: Dict of sanitized parameter names and scalar values.
+                Must not contain file contents or secrets.
+    """
+    if not _AUDIT_LOG_ENABLED:
+        return
+    try:
+        _AUDIT_LOGGER.info(_json.dumps({
+            "ts": _datetime.datetime.utcnow().isoformat() + "Z",
+            "tool": tool_name,
+            "params": params,
+        }))
+    except Exception:
+        pass
 
 DIAGRAM_TYPES_EXTENDED = [
     "class", "sequence", "activity", "state",
@@ -160,16 +192,36 @@ def _resolve_output_dir(project_path, output_dir):
     return od
 
 
-def _save_drawio(xml_content, output_path):
+def _save_drawio(xml_content, output_path, shareable_url=""):
     """Write XML to a .drawio file using UTF-8 encoding.
+
+    Enforces the DRAWIO_MAX_FILE_SIZE_KB size limit (default 2048 KB) before
+    writing. When DRAWIO_SHARE=1 and a shareable_url is provided, prepends an
+    XML comment with the URL at the top of the file for quick discovery.
+    Raises ValueError if the encoded content exceeds the configured size limit.
 
     Args:
         xml_content: mxGraph XML string to write.
         output_path: Absolute path for the output file.
+        shareable_url: Optional app.diagrams.net URL to embed as XML comment.
 
     Returns:
         Absolute path string of the written file.
+
+    Raises:
+        ValueError: When the encoded XML exceeds _DRAWIO_MAX_SIZE_BYTES.
     """
+    if _DRAWIO_SHARE and shareable_url:
+        xml_content = "<!-- Shareable URL: %s -->\n%s" % (shareable_url, xml_content)
+
+    encoded = xml_content.encode("utf-8")
+    if len(encoded) > _DRAWIO_MAX_SIZE_BYTES:
+        raise ValueError(
+            "draw.io XML exceeds size limit (%d KB). "
+            "Set DRAWIO_MAX_FILE_SIZE_KB env var to increase the limit."
+            % (_DRAWIO_MAX_SIZE_BYTES // 1024)
+        )
+
     with open(str(output_path), "w", encoding="utf-8") as f:
         f.write(xml_content)
     return str(output_path)
@@ -270,6 +322,7 @@ def generate_drawio_diagram(
         dict with output_file, shareable_url, diagram_type, file_size_bytes,
         open_hint, rich_styles_applied (bool, additive new key).
     """
+    _audit("generate_drawio_diagram", {"diagram_type": diagram_type, "project_path": project_path, "output_dir": output_dir, "github_repo": github_repo, "use_rich_styles": use_rich_styles})
     _ensure_scripts_path()
     from langgraph_engine.diagrams.drawio_converter import DrawioConverter, get_shareable_url
 
@@ -289,7 +342,6 @@ def generate_drawio_diagram(
     od = _resolve_output_dir(project_path, output_dir)
     filename = "%s-diagram.drawio" % diagram_type
     out_path = od / filename
-    _save_drawio(xml, out_path)
 
     github_raw_url = ""
     if github_repo:
@@ -304,6 +356,7 @@ def generate_drawio_diagram(
         )
 
     url = get_shareable_url(xml, github_raw_url or None)
+    _save_drawio(xml, out_path, url)
 
     return {
         "diagram_type": diagram_type,
@@ -351,6 +404,7 @@ def generate_all_drawio(
         dict with generated list (diagram_type, file, url per diagram),
         output_dir, total count, and failed list.
     """
+    _audit("generate_all_drawio", {"project_path": project_path, "output_dir": output_dir, "github_repo": github_repo})
     _ensure_scripts_path()
     from langgraph_engine.diagrams.drawio_converter import DrawioConverter, get_shareable_url
 
@@ -369,7 +423,6 @@ def generate_all_drawio(
             xml = converter.convert(dtype, analysis_data)
             filename = "%s-diagram.drawio" % dtype
             out_path = od / filename
-            _save_drawio(xml, out_path)
 
             github_raw_url = ""
             if github_repo:
@@ -383,6 +436,7 @@ def generate_all_drawio(
                 )
 
             url = get_shareable_url(xml, github_raw_url or None)
+            _save_drawio(xml, out_path, url)
 
             generated.append({
                 "diagram_type": dtype,
@@ -436,6 +490,7 @@ def get_shareable_url(
     Returns:
         dict with shareable_url, url_type ("github" or "encoded"), file_path.
     """
+    _audit("get_shareable_url", {"drawio_file_path": drawio_file_path, "github_repo": github_repo, "github_branch": github_branch})
     _ensure_scripts_path()
     from langgraph_engine.diagrams.drawio_converter import get_shareable_url as _get_url
 
@@ -500,6 +555,7 @@ def list_drawio_diagrams(
     Returns:
         dict with files list (name, path, size_bytes, modified) and total count.
     """
+    _audit("list_drawio_diagrams", {"project_path": project_path, "output_dir": output_dir})
     od = _resolve_output_dir(project_path, output_dir)
     files = []
 
@@ -552,6 +608,7 @@ def convert_mermaid_to_drawio(
     Returns:
         dict with converted list and summary.
     """
+    _audit("convert_mermaid_to_drawio", {"project_path": project_path, "uml_dir": uml_dir, "output_dir": output_dir, "github_repo": github_repo})
     _ensure_scripts_path()
     from langgraph_engine.diagrams.drawio_converter import DrawioConverter, get_shareable_url
 
@@ -599,7 +656,6 @@ def convert_mermaid_to_drawio(
             xml = converter.convert(dtype, analysis_data)
             out_filename = stem + ".drawio"
             out_path = od / out_filename
-            _save_drawio(xml, out_path)
 
             github_raw_url = ""
             if github_repo:
@@ -613,6 +669,7 @@ def convert_mermaid_to_drawio(
                 )
 
             url = get_shareable_url(xml, github_raw_url or None)
+            _save_drawio(xml, out_path, url)
             converted.append({
                 "source_md": str(md_file),
                 "output_drawio": str(out_path),
