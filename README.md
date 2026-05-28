@@ -1,6 +1,6 @@
 # mcp-drawio-diagram
 
-![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-blue)
+![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue)
 ![License MIT](https://img.shields.io/badge/License-MIT-green)
 ![Part of claude-workflow-engine](https://img.shields.io/badge/Part%20of-claude--workflow--engine-blueviolet)
 ![Domain 46 KG](https://img.shields.io/badge/Domain%2046%20KG-RS%3D1.0-brightgreen)

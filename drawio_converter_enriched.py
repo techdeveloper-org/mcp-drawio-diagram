@@ -9,7 +9,7 @@ Allows server.py to import RICH_STYLE_CONFIG without needing to know the
 full package path. Falls back gracefully if the scripts path is not yet
 on sys.path at import time.
 
-Python 3.8+ only. ASCII-only source (cp1252 safe on Windows).
+Python 3.11+. ASCII-only source (cp1252 safe on Windows).
 """
 
 import sys

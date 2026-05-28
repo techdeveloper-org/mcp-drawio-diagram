@@ -11,7 +11,7 @@ Tools:
     list_drawio_diagrams       - List existing .drawio files in output dir
     convert_mermaid_to_drawio  - Convert existing Mermaid .md to .drawio (best-effort)
 
-Python 3.8+ only. ASCII-only source (cp1252 safe on Windows).
+Python 3.11+. ASCII-only source (cp1252 safe on Windows).
 Backward compatibility: generate_drawio_diagram(type, path) is identical to pre-integration.
 """
 
