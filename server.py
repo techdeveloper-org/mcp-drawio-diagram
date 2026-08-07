@@ -16,12 +16,15 @@ Backward compatibility: generate_drawio_diagram(type, path) is identical to pre-
 """
 
 import datetime as _datetime
+import inspect as _inspect
 import json as _json
 import logging as _logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
+
+from pydantic import Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -32,6 +35,12 @@ try:
     from mcp.server.mcpserver import MCPServer
 except ImportError:  # mcp < 2.0
     from mcp.server.fastmcp import FastMCP as MCPServer
+
+try:
+    from mcp.types import ToolAnnotations
+except ImportError:  # very old SDK without the annotations model
+    ToolAnnotations = None
+
 from base.decorators import mcp_tool_handler
 
 mcp = MCPServer(
@@ -65,6 +74,7 @@ _DRAWIO_SHARE = os.environ.get("DRAWIO_SHARE", "0") == "1"
 
 _AUDIT_LOG_ENABLED = os.environ.get("ENABLE_AUDIT_LOG", "0") == "1"
 _AUDIT_LOGGER = _logging.getLogger("drawio_diagram.audit")
+_LOG = _logging.getLogger("drawio_diagram")
 
 
 def _audit(tool_name, params):
@@ -72,8 +82,9 @@ def _audit(tool_name, params):
     """Log a structured audit entry when ENABLE_AUDIT_LOG=1.
 
     Emits a single-line JSON record to the drawio_diagram.audit logger at INFO
-    level. Suppresses all exceptions silently so audit failures never interrupt
-    tool execution. Set ENABLE_AUDIT_LOG=1 environment variable to activate.
+    level. A serialization failure is downgraded to a warning rather than
+    propagating, so audit logging never interrupts tool execution, but it is
+    never silently discarded either. Set ENABLE_AUDIT_LOG=1 to activate.
 
     Args:
         tool_name: MCP tool name being invoked.
@@ -84,36 +95,184 @@ def _audit(tool_name, params):
         return
     try:
         _AUDIT_LOGGER.info(_json.dumps({
-            "ts": _datetime.datetime.utcnow().isoformat() + "Z",
+            "ts": _datetime.datetime.now(_datetime.timezone.utc).isoformat(),
             "tool": tool_name,
             "params": params,
         }))
-    except Exception:
-        pass
+    except (TypeError, ValueError) as exc:
+        _AUDIT_LOGGER.warning(
+            "audit record for %s could not be serialized: %s", tool_name, exc
+        )
+
+
+_TOOL_KWARGS = set(_inspect.signature(mcp.tool).parameters)
+
+
+def _tool(**kwargs):
+    """Register an MCP tool, dropping kwargs the installed SDK does not accept.
+
+    ``annotations`` and ``structured_output`` were added to FastMCP at
+    different points, so unsupported keywords are filtered rather than raising
+    at import time on an older SDK.
+
+    Args:
+        **kwargs: Keyword arguments for the underlying ``mcp.tool`` decorator.
+
+    Returns:
+        The decorator returned by ``mcp.tool``.
+    """
+    supported = {key: value for key, value in kwargs.items() if key in _TOOL_KWARGS}
+    return mcp.tool(**supported)
+
+
+def _annotations(title, read_only, destructive, idempotent, open_world=False):
+    """Build a ``ToolAnnotations`` object, or None on an SDK without the model.
+
+    An omitted annotation set is read by the specification as the least-safe
+    possible declaration, so every tool here declares all four hints.
+
+    Args:
+        title: Human-readable tool title.
+        read_only: True when the tool performs no writes.
+        destructive: True when the tool's effect is irreversible.
+        idempotent: True when repeat calls with identical arguments have the
+            same cumulative effect as a single call.
+        open_world: True when the tool reaches an external or open-ended system.
+
+    Returns:
+        A ``ToolAnnotations`` instance, or None when unavailable.
+    """
+    if ToolAnnotations is None:
+        return None
+    return ToolAnnotations(
+        title=title,
+        readOnlyHint=read_only,
+        destructiveHint=destructive,
+        idempotentHint=idempotent,
+        openWorldHint=open_world,
+    )
+
+
+ProjectPath = Annotated[str, Field(
+    description="Absolute root path of the project to analyze."
+)]
+OutputDir = Annotated[str, Field(
+    description=(
+        "Output directory for the .drawio files, relative to the project root "
+        "or absolute. Leave empty to use the DRAWIO_OUTPUT_DIR environment "
+        "variable, falling back to '{project_root}/drawio'."
+    )
+)]
+GithubRepo = Annotated[str, Field(
+    description="Optional \"owner/repo\" used to build a raw.githubusercontent.com URL for the file. Empty falls back to an inline-encoded app.diagrams.net URL."
+)]
+GithubBranch = Annotated[str, Field(
+    description="Branch name used in the GitHub raw URL. Ignored when github_repo is empty."
+)]
 
 DIAGRAM_TYPES_EXTENDED = [
     "class", "sequence", "activity", "state",
     "component", "package", "deployment", "usecase",
     "object", "communication", "composite", "interaction",
+    "call_graph",
     "timing",
     "call_graph_rich",
 ]
 
+# Canonical output file stems mandated for the standard diagram set.
+_CANONICAL_STEMS = {
+    "class": "class_diagram",
+    "package": "package_diagram",
+    "component": "component_diagram",
+    "sequence": "sequence_diagram",
+    "state": "state_diagram",
+    "activity": "activity_diagram",
+    "deployment": "deployment_diagram",
+    "usecase": "usecase_diagram",
+    "object": "object_diagram",
+    "composite": "composite_diagram",
+    "interaction": "interaction_diagram",
+    "communication": "communication_diagram",
+    "call_graph": "call_graph_diagram",
+}
 
-def _scripts_dir():
-    """Return the scripts directory Path for langgraph_engine imports.
+
+def _canonical_stem(diagram_type):
+    """Map a diagram type slug onto its mandated output file stem.
+
+    Args:
+        diagram_type: Diagram type slug such as ``composite`` or ``call_graph``.
 
     Returns:
-        Path to the scripts directory three levels above this file.
+        The canonical snake_case stem, e.g. ``composite_diagram``.
     """
-    return Path(__file__).resolve().parent.parent.parent / "scripts"
+    slug = str(diagram_type).strip().lower().replace("-", "_")
+    if slug in _CANONICAL_STEMS:
+        return _CANONICAL_STEMS[slug]
+    if not slug.endswith("_diagram"):
+        slug = "%s_diagram" % slug
+    return slug
+
+
+def _engine_root_candidates():
+    """Return the candidate directories that may contain ``langgraph_engine``.
+
+    Ordered most-specific first: explicit environment overrides, then the
+    sibling claude-workflow-engine checkout (where the package lives at the
+    repository root), then its legacy ``scripts/`` location.
+
+    Returns:
+        List of Path objects, in probe order.
+    """
+    here = Path(__file__).resolve().parent
+    workspace = here.parent
+    candidates = []
+    for var in ("CLAUDE_WORKFLOW_ENGINE_PATH", "WORKFLOW_ENGINE_PATH"):
+        raw = os.environ.get(var, "").strip()
+        if raw:
+            candidates.append(Path(raw))
+            candidates.append(Path(raw) / "scripts")
+    candidates.append(workspace / "claude-workflow-engine")
+    candidates.append(workspace / "claude-workflow-engine" / "scripts")
+    candidates.append(workspace.parent / "scripts")
+    return candidates
+
+
+def _scripts_dir():
+    """Return the resolved claude-workflow-engine root, or the first candidate.
+
+    Returns:
+        Path to the directory that contains ``langgraph_engine``, or the first
+        probe candidate when none of them does.
+    """
+    for candidate in _engine_root_candidates():
+        if (candidate / "langgraph_engine" / "__init__.py").is_file():
+            return candidate
+    return _engine_root_candidates()[0]
 
 
 def _ensure_scripts_path():
-    """Insert scripts_dir into sys.path if not already present."""
-    sd = str(_scripts_dir())
-    if sd not in sys.path:
-        sys.path.insert(0, sd)
+    """Put the claude-workflow-engine root on sys.path.
+
+    Only a directory that actually contains ``langgraph_engine/__init__.py`` is
+    added, so a stale or renamed checkout produces an explicit failure instead
+    of a silently ineffective sys.path entry.
+
+    Returns:
+        The Path that was added or already present, or None when no candidate
+        contains the package.
+    """
+    for candidate in _engine_root_candidates():
+        if (candidate / "langgraph_engine" / "__init__.py").is_file():
+            if str(candidate) not in sys.path:
+                sys.path.insert(0, str(candidate))
+            return candidate
+    _LOG.warning(
+        "langgraph_engine not found in any known location: %s. "
+        "Set CLAUDE_WORKFLOW_ENGINE_PATH to the claude-workflow-engine checkout.",
+        ", ".join(str(c) for c in _engine_root_candidates()),
+    )
+    return None
 
 
 def _get_converter():
@@ -141,7 +300,11 @@ def _get_ast_analyzer(project_path):
         from langgraph_engine.diagrams.ast_analyzer import UMLAstAnalyzer
         analyzer = UMLAstAnalyzer(project_path)
         return analyzer.analyze()
-    except Exception:
+    except Exception as exc:
+        _LOG.warning(
+            "AST analysis of %s failed, falling back to call graph: %s: %s",
+            project_path, type(exc).__name__, exc,
+        )
         return {}
 
 
@@ -177,21 +340,36 @@ def _get_call_graph_data(project_path):
             method_name = info.get("method", fqn.split(".")[-1] if "." in fqn else fqn)
             existing["methods"].append({"name": method_name, "visibility": "+", "complexity": 0})
         return {"classes": classes}
-    except Exception:
+    except Exception as exc:
+        _LOG.warning(
+            "call graph build for %s failed: %s: %s",
+            project_path, type(exc).__name__, exc,
+        )
         return {}
 
 
 def _resolve_output_dir(project_path, output_dir):
-    """Return absolute Path for output_dir, creating it if needed.
+    """Return absolute Path for the draw.io output directory, creating it.
+
+    Precedence is DRAWIO_OUTPUT_DIR, then the caller-supplied directory, then
+    the mandated default of ``drawio`` beneath the project root. An empty
+    string means "not supplied", which is why the tool defaults are empty
+    rather than a hard-coded path.
+
+    Directory creation is deliberately allowed to raise: an unwritable output
+    directory is a hard failure that must stop the caller, unlike a single
+    diagram that fails to convert.
 
     Args:
         project_path: Root path of the project.
-        output_dir: Directory path, relative to project_path or absolute.
+        output_dir: Caller-supplied directory, or an empty string.
 
     Returns:
         Resolved absolute Path object (created if not exists).
     """
-    od = Path(output_dir)
+    env_dir = os.environ.get("DRAWIO_OUTPUT_DIR", "").strip()
+    resolved = env_dir or (output_dir or "").strip() or "drawio"
+    od = Path(resolved)
     if not od.is_absolute():
         od = Path(project_path) / od
     od.mkdir(parents=True, exist_ok=True)
@@ -284,17 +462,20 @@ def _build_rich_style_config(complexity_threshold_low, complexity_threshold_high
 # Backward compat: generate_drawio_diagram(type, path) identical to pre-integration.
 # ======================================================================
 
-@mcp.tool()
+@_tool(
+    annotations=_annotations("Generate one draw.io diagram", False, False, True, False),
+    structured_output=False,
+)
 @mcp_tool_handler
 def generate_drawio_diagram(
-    diagram_type: str,
-    project_path: str,
-    output_dir: str = "docs/drawio",
-    github_repo: str = "",
-    github_branch: str = "main",
-    use_rich_styles: bool = False,
-    complexity_threshold_low: int = 2,
-    complexity_threshold_high: int = 4,
+    diagram_type: Annotated[str, Field(description="Diagram type to generate. One of: class, sequence, activity, state, component, package, deployment, usecase, object, communication, composite, interaction, call_graph, timing, call_graph_rich.")],
+    project_path: ProjectPath,
+    output_dir: OutputDir = "",
+    github_repo: GithubRepo = "",
+    github_branch: GithubBranch = "main",
+    use_rich_styles: Annotated[bool, Field(description="When true, apply complexity-based colour coding from RICH_STYLE_CONFIG. False reproduces the plain pre-integration styling exactly.")] = False,
+    complexity_threshold_low: Annotated[int, Field(description="Methods with cyclomatic complexity below this value are filled white. Only used when use_rich_styles is true.")] = 2,
+    complexity_threshold_high: Annotated[int, Field(description="Methods at or above this complexity are filled red. Only used when use_rich_styles is true.")] = 4,
 ) -> dict:
     """Generate a single UML diagram as an editable .drawio file.
 
@@ -329,6 +510,12 @@ def generate_drawio_diagram(
         open_hint, rich_styles_applied (bool, additive new key).
     """
     _audit("generate_drawio_diagram", {"diagram_type": diagram_type, "project_path": project_path, "output_dir": output_dir, "github_repo": github_repo, "use_rich_styles": use_rich_styles})
+    if diagram_type not in DIAGRAM_TYPES_EXTENDED:
+        raise ValueError(
+            "Unknown diagram_type: %s (expected one of: %s)"
+            % (diagram_type, ", ".join(DIAGRAM_TYPES_EXTENDED))
+        )
+
     _ensure_scripts_path()
     from langgraph_engine.diagrams.drawio_converter import DrawioConverter, get_shareable_url
 
@@ -346,7 +533,7 @@ def generate_drawio_diagram(
     xml = converter.convert(diagram_type, analysis_data, style_config)
 
     od = _resolve_output_dir(project_path, output_dir)
-    filename = "%s-diagram.drawio" % diagram_type
+    filename = "%s.drawio" % _canonical_stem(diagram_type)
     out_path = od / filename
 
     github_raw_url = ""
@@ -382,13 +569,16 @@ def generate_drawio_diagram(
 # Tool 2: generate_all_drawio (MODIFIED -- DIAGRAM_TYPES extended to 14)
 # ======================================================================
 
-@mcp.tool()
+@_tool(
+    annotations=_annotations("Generate all draw.io diagrams", False, False, True, False),
+    structured_output=False,
+)
 @mcp_tool_handler
 def generate_all_drawio(
-    project_path: str,
-    output_dir: str = "docs/drawio",
-    github_repo: str = "",
-    github_branch: str = "main",
+    project_path: ProjectPath,
+    output_dir: OutputDir = "",
+    github_repo: GithubRepo = "",
+    github_branch: GithubBranch = "main",
 ) -> dict:
     """Generate ALL 14 SDLC UML diagram types as editable .drawio files.
 
@@ -427,7 +617,7 @@ def generate_all_drawio(
     for dtype in DIAGRAM_TYPES_EXTENDED:
         try:
             xml = converter.convert(dtype, analysis_data)
-            filename = "%s-diagram.drawio" % dtype
+            filename = "%s.drawio" % _canonical_stem(dtype)
             out_path = od / filename
 
             github_raw_url = ""
@@ -451,7 +641,13 @@ def generate_all_drawio(
                 "file_size_bytes": len(xml.encode("utf-8")),
             })
         except Exception as e:
-            failed.append({"diagram_type": dtype, "error": str(e)})
+            _LOG.error(
+                "draw.io generation for type %s failed: %s: %s",
+                dtype, type(e).__name__, e,
+            )
+            failed.append(
+                {"diagram_type": dtype, "error": str(e), "error_type": type(e).__name__}
+            )
 
     return {
         "output_dir": str(od),
@@ -471,13 +667,16 @@ def generate_all_drawio(
 # Tool 3: get_shareable_url -- UNCHANGED
 # ======================================================================
 
-@mcp.tool()
+@_tool(
+    annotations=_annotations("Get shareable draw.io URL", True, False, True, True),
+    structured_output=False,
+)
 @mcp_tool_handler
 def get_shareable_url(
-    drawio_file_path: str,
-    github_repo: str = "",
-    github_branch: str = "main",
-    project_path: str = "",
+    drawio_file_path: Annotated[str, Field(description="Absolute path to an existing .drawio file to build a shareable URL for.")],
+    github_repo: GithubRepo = "",
+    github_branch: GithubBranch = "main",
+    project_path: Annotated[str, Field(description="Project root used to compute the path relative to the repository for the GitHub URL. Empty uses the bare file name.")] = "",
 ) -> dict:
     """Get a shareable app.diagrams.net URL for an existing .drawio file.
 
@@ -543,11 +742,14 @@ def get_shareable_url(
 # Tool 4: list_drawio_diagrams (MODIFIED -- supported_types extended to 14)
 # ======================================================================
 
-@mcp.tool()
+@_tool(
+    annotations=_annotations("List draw.io diagrams", True, False, True, False),
+    structured_output=False,
+)
 @mcp_tool_handler
 def list_drawio_diagrams(
-    project_path: str,
-    output_dir: str = "docs/drawio",
+    project_path: ProjectPath,
+    output_dir: OutputDir = "",
 ) -> dict:
     """List all existing .drawio diagram files in the output directory.
 
@@ -586,60 +788,64 @@ def list_drawio_diagrams(
 # Tool 5: convert_mermaid_to_drawio -- UNCHANGED
 # ======================================================================
 
-@mcp.tool()
+@_tool(
+    annotations=_annotations("Regenerate draw.io from Mermaid set", False, False, True, False),
+    structured_output=False,
+)
 @mcp_tool_handler
 def convert_mermaid_to_drawio(
-    project_path: str,
-    uml_dir: str = "docs/uml",
-    output_dir: str = "docs/drawio",
-    github_repo: str = "",
-    github_branch: str = "main",
+    project_path: ProjectPath,
+    uml_dir: Annotated[str, Field(description="Directory holding the existing Mermaid .md diagrams, relative to the project root or absolute. Leave empty to use UML_OUTPUT_DIR, falling back to '{project_root}/uml'.")] = "",
+    output_dir: OutputDir = "",
+    github_repo: GithubRepo = "",
+    github_branch: GithubBranch = "main",
 ) -> dict:
     """Re-generate .drawio files for all existing Mermaid UML .md files.
 
-    Scans docs/uml/ for *-diagram.md files and re-generates them as .drawio
-    using the same project analysis. Useful for converting an existing Mermaid
-    workflow to draw.io without re-running the full pipeline.
+    Scans the Mermaid output directory for *_diagram.md files (and legacy
+    *-diagram.md files) and re-generates them as .drawio using the same project
+    analysis. Useful for converting an existing Mermaid workflow to draw.io
+    without re-running the full pipeline.
 
     Note: The Mermaid text itself is not parsed -- instead the project is
-    re-analyzed to produce equivalent draw.io diagrams.
-
-    Args:
-        project_path: Root path of the project.
-        uml_dir: Directory containing existing Mermaid .md files.
-        output_dir: Output directory for .drawio files. Default: docs/drawio
-        github_repo: Optional "owner/repo" for shareable URLs.
-        github_branch: Branch. Default: "main"
-
-    Returns:
-        dict with converted list and summary.
+    re-analyzed to produce equivalent draw.io diagrams. Each source file is
+    converted independently, so one failure is recorded and skipped rather than
+    aborting the run.
     """
     _audit("convert_mermaid_to_drawio", {"project_path": project_path, "uml_dir": uml_dir, "output_dir": output_dir, "github_repo": github_repo})
     _ensure_scripts_path()
     from langgraph_engine.diagrams.drawio_converter import DrawioConverter, get_shareable_url
 
     MERMAID_TYPE_MAP = {
-        "class-diagram":                "class",
-        "sequence-diagram":             "sequence",
-        "activity-diagram":             "activity",
-        "state-diagram":                "state",
-        "component-diagram":            "component",
-        "package-diagram":              "package",
-        "deployment-diagram":           "deployment",
-        "use-case-diagram":             "usecase",
-        "object-diagram":               "object",
-        "communication-diagram":        "communication",
-        "composite-structure-diagram":  "composite",
-        "interaction-overview-diagram": "interaction",
-        "call-graph-diagram":           "class",
-        "timing-diagram":               "timing",
-        "uml-from-code-diagram":        "class",
+        "class_diagram":                "class",
+        "sequence_diagram":             "sequence",
+        "activity_diagram":             "activity",
+        "state_diagram":                "state",
+        "component_diagram":            "component",
+        "package_diagram":              "package",
+        "deployment_diagram":           "deployment",
+        "usecase_diagram":              "usecase",
+        "use_case_diagram":             "usecase",
+        "object_diagram":               "object",
+        "communication_diagram":        "communication",
+        "composite_diagram":            "composite",
+        "composite_structure_diagram":  "composite",
+        "interaction_diagram":          "interaction",
+        "interaction_overview_diagram": "interaction",
+        "call_graph_diagram":           "call_graph",
+        "timing_diagram":               "timing",
+        "uml_from_code_diagram":        "class",
     }
 
+    resolved_uml_dir = (
+        os.environ.get("UML_OUTPUT_DIR", "").strip()
+        or (uml_dir or "").strip()
+        or "uml"
+    )
     uml_path = (
-        Path(project_path) / uml_dir
-        if not Path(uml_dir).is_absolute()
-        else Path(uml_dir)
+        Path(project_path) / resolved_uml_dir
+        if not Path(resolved_uml_dir).is_absolute()
+        else Path(resolved_uml_dir)
     )
     analysis_data = _get_ast_analyzer(project_path)
     if not analysis_data.get("classes"):
@@ -651,8 +857,12 @@ def convert_mermaid_to_drawio(
     converted = []
     skipped = []
 
-    for md_file in sorted(uml_path.glob("*-diagram.md")):
-        stem = md_file.stem
+    md_files = sorted(
+        set(uml_path.glob("*_diagram.md")) | set(uml_path.glob("*-diagram.md"))
+    )
+
+    for md_file in md_files:
+        stem = md_file.stem.replace("-", "_")
         dtype = MERMAID_TYPE_MAP.get(stem)
         if not dtype:
             skipped.append({"file": str(md_file), "reason": "unknown type"})
@@ -660,7 +870,7 @@ def convert_mermaid_to_drawio(
 
         try:
             xml = converter.convert(dtype, analysis_data)
-            out_filename = stem + ".drawio"
+            out_filename = "%s.drawio" % _canonical_stem(dtype)
             out_path = od / out_filename
 
             github_raw_url = ""
@@ -683,10 +893,16 @@ def convert_mermaid_to_drawio(
                 "shareable_url": url,
             })
         except Exception as e:
-            skipped.append({"file": str(md_file), "reason": str(e)})
+            _LOG.error(
+                "converting %s failed: %s: %s", md_file, type(e).__name__, e
+            )
+            skipped.append(
+                {"file": str(md_file), "reason": str(e), "error_type": type(e).__name__}
+            )
 
     return {
         "output_dir": str(od),
+        "uml_dir": str(uml_path),
         "converted": converted,
         "skipped": skipped,
         "total_converted": len(converted),
@@ -695,4 +911,4 @@ def convert_mermaid_to_drawio(
 
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport="stdio")
