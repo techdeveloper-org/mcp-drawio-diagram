@@ -1,0 +1,63 @@
+{
+  "schema": "library-project-sync-v1",
+  "library": {
+    "name": "claude-global-library",
+    "version": "29.82.1"
+  },
+  "agents": [
+    "drawio-diagram-architect",
+    "mermaid-diagram-engineer",
+    "uml-behavioral-diagram-engineer",
+    "uml-diagram-mathematics-expert",
+    "uml-from-code-engineer",
+    "uml-interaction-diagram-engineer",
+    "uml-structural-diagram-engineer"
+  ],
+  "skills": [
+    "diagram-from-code-core",
+    "diagram-layout-algorithms-core",
+    "drawio-xml-generation-core",
+    "mermaid-syntax-engine-core",
+    "uml-activity-diagram-core",
+    "uml-class-diagram-core",
+    "uml-communication-diagram-core",
+    "uml-component-diagram-core",
+    "uml-composite-structure-core",
+    "uml-deployment-diagram-core",
+    "uml-interaction-overview-core",
+    "uml-object-diagram-core",
+    "uml-package-diagram-core",
+    "uml-profile-diagram-core",
+    "uml-sequence-diagram-core",
+    "uml-state-machine-core",
+    "uml-timing-diagram-core",
+    "uml-use-case-diagram-core"
+  ],
+  "managed_files": [
+    ".claude/agents/drawio-diagram-architect.md",
+    ".claude/agents/mermaid-diagram-engineer.md",
+    ".claude/agents/uml-behavioral-diagram-engineer.md",
+    ".claude/agents/uml-diagram-mathematics-expert.md",
+    ".claude/agents/uml-from-code-engineer.md",
+    ".claude/agents/uml-interaction-diagram-engineer.md",
+    ".claude/agents/uml-structural-diagram-engineer.md",
+    ".claude/skills/diagram-from-code-core/SKILL.md",
+    ".claude/skills/diagram-layout-algorithms-core/SKILL.md",
+    ".claude/skills/drawio-xml-generation-core/SKILL.md",
+    ".claude/skills/mermaid-syntax-engine-core/SKILL.md",
+    ".claude/skills/uml-activity-diagram-core/SKILL.md",
+    ".claude/skills/uml-class-diagram-core/SKILL.md",
+    ".claude/skills/uml-communication-diagram-core/SKILL.md",
+    ".claude/skills/uml-component-diagram-core/SKILL.md",
+    ".claude/skills/uml-composite-structure-core/SKILL.md",
+    ".claude/skills/uml-deployment-diagram-core/SKILL.md",
+    ".claude/skills/uml-interaction-overview-core/SKILL.md",
+    ".claude/skills/uml-object-diagram-core/SKILL.md",
+    ".claude/skills/uml-package-diagram-core/SKILL.md",
+    ".claude/skills/uml-profile-diagram-core/SKILL.md",
+    ".claude/skills/uml-sequence-diagram-core/SKILL.md",
+    ".claude/skills/uml-state-machine-core/SKILL.md",
+    ".claude/skills/uml-timing-diagram-core/SKILL.md",
+    ".claude/skills/uml-use-case-diagram-core/SKILL.md"
+  ]
+}
