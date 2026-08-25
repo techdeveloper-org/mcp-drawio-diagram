@@ -179,6 +179,109 @@ DIAGRAM_TYPES_EXTENDED = [
     "call_graph_rich",
 ]
 
+
+def _model_data_field(hint):
+    """Build a ModelData Field description carrying a type-specific hint.
+
+    Args:
+        hint: Short phrase naming the payload's primary key(s), e.g.
+            "\"classes\"" or "\"nodes\"" -- see UDM_PRIMARY_KEY in
+            langgraph_engine.diagrams.legacy_generator for the full schema.
+
+    Returns:
+        An Annotated[str, Field(...)] type for use as a tool parameter.
+    """
+    return Annotated[str, Field(
+        description=(
+            "Optional JSON object of pre-built structural data (UDM v1) to "
+            "render from, instead of AST-scanning project_path. Use this when "
+            "the authoritative structure lives somewhere other than code -- an "
+            "architecture corpus, a spec, or a schema. DrawioConverter is "
+            "fully deterministic and dict-driven; no LLM is ever involved "
+            "either way. The object must contain a non-empty %s list; a "
+            "payload missing it is rejected rather than silently rendered "
+            "from placeholder data. Max 512 KB (see UML_MAX_MODEL_DATA_KB)."
+            % hint
+        )
+    )]
+
+
+_MAX_MODEL_DATA_BYTES = int(os.environ.get("UML_MAX_MODEL_DATA_KB", "512")) * 1024
+
+# diagram_type slug -> UDM primary key, duplicated from
+# langgraph_engine.diagrams.legacy_generator.UDM_PRIMARY_KEY so validation
+# here does not require importing the engine before _ensure_scripts_path()
+# has run. Kept in sync by tests/test_model_data.py in both repos.
+_UDM_PRIMARY_KEY = {
+    "class": "classes",
+    "package": "packages",
+    "component": "components",
+    "sequence": "call_chains",
+    "state": "states",
+    "activity": "steps",
+    "deployment": "nodes",
+    "usecase": "use_cases",
+    "object": "objects",
+    "communication": "participants",
+    "composite": "components",
+    "interaction": "steps",
+    "call_graph": "methods",
+}
+
+
+def _parse_model_data(raw, diagram_type):
+    # type: (str, str) -> tuple
+    """Parse and validate a caller-supplied model_data JSON string.
+
+    Args:
+        raw: JSON object string, or "" when the parameter was not supplied.
+        diagram_type: Diagram type slug, used to check the UDM primary key.
+            Types outside _UDM_PRIMARY_KEY (timing, call_graph_rich) skip
+            the primary-key check -- DrawioConverter's analysis_data shape
+            for those is not yet part of the UDM contract.
+
+    Returns:
+        (data, error): (None, None) when raw is empty ("not supplied" -- the
+        caller follows the existing AST-derived path); (dict, None) on
+        success; (None, str) with a caller-actionable message on failure.
+    """
+    if raw is None or raw.strip() == "":
+        return None, None
+
+    raw_bytes = raw.encode("utf-8")
+    if len(raw_bytes) > _MAX_MODEL_DATA_BYTES:
+        return None, (
+            "model_data exceeds %d KB limit; set UML_MAX_MODEL_DATA_KB to raise it"
+            % (_MAX_MODEL_DATA_BYTES // 1024)
+        )
+    if "\x00" in raw:
+        return None, "model_data contains null bytes"
+
+    try:
+        data = _json.loads(raw)
+    except _json.JSONDecodeError as exc:
+        return None, "model_data is not valid JSON: %s at line %d column %d" % (
+            exc.msg, exc.lineno, exc.colno,
+        )
+
+    if not isinstance(data, dict):
+        return None, "model_data must be a JSON object, got %s" % type(data).__name__
+
+    primary_key = _UDM_PRIMARY_KEY.get(diagram_type)
+    if primary_key is not None:
+        value = data.get(primary_key)
+        if not value:
+            return None, (
+                "model_data for '%s' must contain a non-empty '%s' list"
+                % (diagram_type, primary_key)
+            )
+        if not isinstance(value, list):
+            return None, "model_data['%s'] must be a list, got %s" % (
+                primary_key, type(value).__name__,
+            )
+
+    return data, None
+
 # Canonical output file stems mandated for the standard diagram set.
 _CANONICAL_STEMS = {
     "class": "class_diagram",
@@ -279,10 +382,17 @@ def _get_converter():
     """Lazy import and return a DrawioConverter instance.
 
     Returns:
-        DrawioConverter instance from langgraph_engine.diagrams.drawio_converter.
+        DrawioConverter instance from
+        langgraph_engine.diagrams.drawio.drawio_converter_enriched -- the
+        3-arg-signature subclass (convert(diagram_type, analysis_data,
+        style_config=None)), not the 2-arg base class. mcp-drawio-diagram#4:
+        the base class re-exported from langgraph_engine.diagrams
+        .drawio_converter raises TypeError against every call site in this
+        file, all of which pass (or rely on default handling for) a third
+        argument.
     """
     _ensure_scripts_path()
-    from langgraph_engine.diagrams.drawio_converter import DrawioConverter
+    from langgraph_engine.diagrams.drawio.drawio_converter_enriched import DrawioConverter
     return DrawioConverter()
 
 
@@ -476,6 +586,7 @@ def generate_drawio_diagram(
     use_rich_styles: Annotated[bool, Field(description="When true, apply complexity-based colour coding from RICH_STYLE_CONFIG. False reproduces the plain pre-integration styling exactly.")] = False,
     complexity_threshold_low: Annotated[int, Field(description="Methods with cyclomatic complexity below this value are filled white. Only used when use_rich_styles is true.")] = 2,
     complexity_threshold_high: Annotated[int, Field(description="Methods at or above this complexity are filled red. Only used when use_rich_styles is true.")] = 4,
+    model_data: _model_data_field("(e.g. \"classes\" for class, \"nodes\" for deployment -- see UDM v1)") = "",
 ) -> dict:
     """Generate a single UML diagram as an editable .drawio file.
 
@@ -504,20 +615,38 @@ def generate_drawio_diagram(
                                    this value receive white fill. Default 2.
         complexity_threshold_high: Methods at or above this value receive
                                     red fill. Default 4.
+        model_data: Optional UDM JSON payload to render deterministically
+                    instead of AST/CallGraph-scanning project_path.
 
     Returns:
         dict with output_file, shareable_url, diagram_type, file_size_bytes,
-        open_hint, rich_styles_applied (bool, additive new key).
+        open_hint, rich_styles_applied (bool, additive new key), source
+        ("model_data" | "derived", additive new key).
     """
-    _audit("generate_drawio_diagram", {"diagram_type": diagram_type, "project_path": project_path, "output_dir": output_dir, "github_repo": github_repo, "use_rich_styles": use_rich_styles})
+    _audit("generate_drawio_diagram", {
+        "diagram_type": diagram_type, "project_path": project_path,
+        "output_dir": output_dir, "github_repo": github_repo,
+        "use_rich_styles": use_rich_styles,
+        "model_data_bytes": len(model_data or ""),
+    })
     if diagram_type not in DIAGRAM_TYPES_EXTENDED:
         raise ValueError(
             "Unknown diagram_type: %s (expected one of: %s)"
             % (diagram_type, ", ".join(DIAGRAM_TYPES_EXTENDED))
         )
 
+    data, err = _parse_model_data(model_data, diagram_type)
+    if err:
+        return {"diagram_type": diagram_type, "format": "drawio", "output_file": "",
+                "error": err, "source": "error"}
+
     _ensure_scripts_path()
-    from langgraph_engine.diagrams.drawio_converter import DrawioConverter, get_shareable_url
+    # mcp-drawio-diagram#4: the base DrawioConverter re-exported from
+    # drawio_converter is a 2-arg convert(diagram_type, analysis_data); this
+    # call site passes a third argument (or relies on the 15-type
+    # SUPPORTED_TYPES list), which only the enriched subclass provides.
+    from langgraph_engine.diagrams.drawio.drawio_converter_enriched import DrawioConverter
+    from langgraph_engine.diagrams.drawio_converter import get_shareable_url
 
     style_config = None
     if use_rich_styles:
@@ -525,9 +654,14 @@ def generate_drawio_diagram(
             complexity_threshold_low, complexity_threshold_high
         )
 
-    analysis_data = _get_ast_analyzer(project_path)
-    if not analysis_data.get("classes"):
-        analysis_data = _get_call_graph_data(project_path)
+    if data is not None:
+        analysis_data = data
+        source = "model_data"
+    else:
+        analysis_data = _get_ast_analyzer(project_path)
+        if not analysis_data.get("classes"):
+            analysis_data = _get_call_graph_data(project_path)
+        source = "derived"
 
     converter = DrawioConverter()
     xml = converter.convert(diagram_type, analysis_data, style_config)
@@ -562,6 +696,7 @@ def generate_drawio_diagram(
             "or VS Code draw.io extension"
         ),
         "rich_styles_applied": use_rich_styles and style_config is not None,
+        "source": source,
     }
 
 
@@ -579,6 +714,19 @@ def generate_all_drawio(
     output_dir: OutputDir = "",
     github_repo: GithubRepo = "",
     github_branch: GithubBranch = "main",
+    model_data: Annotated[str, Field(
+        description=(
+            "Optional JSON object mapping diagram type slugs to UDM payloads, "
+            "e.g. {\"class\": {\"classes\": [...]}, \"deployment\": {\"nodes\": "
+            "[...]}}. Slugs present are rendered deterministically from their "
+            "payload; slugs absent fall back to the existing AST/CallGraph "
+            "derivation, unchanged. A payload missing its type's primary key "
+            "is rejected for that type only (reported in model_data_errors). "
+            "Valid slugs: class, package, component, sequence, state, "
+            "activity, deployment, usecase, object, communication, "
+            "composite, interaction, call_graph. Max 512 KB total."
+        )
+    )] = "",
 ) -> dict:
     """Generate ALL 14 SDLC UML diagram types as editable .drawio files.
 
@@ -595,18 +743,63 @@ def generate_all_drawio(
         output_dir: Output directory. Default: docs/drawio
         github_repo: Optional "owner/repo" for shareable GitHub URLs.
         github_branch: Branch for GitHub raw URL. Default: "main"
+        model_data: Optional per-type UDM payload map. See parameter
+            description for shape.
 
     Returns:
-        dict with generated list (diagram_type, file, url per diagram),
-        output_dir, total count, and failed list.
+        dict with generated list (diagram_type, file, url, source per
+        diagram), output_dir, total count, failed list, and
+        model_data_errors (additive new key).
     """
-    _audit("generate_all_drawio", {"project_path": project_path, "output_dir": output_dir, "github_repo": github_repo})
+    _audit("generate_all_drawio", {
+        "project_path": project_path, "output_dir": output_dir,
+        "github_repo": github_repo, "model_data_bytes": len(model_data or ""),
+    })
     _ensure_scripts_path()
-    from langgraph_engine.diagrams.drawio_converter import DrawioConverter, get_shareable_url
+    # mcp-drawio-diagram#4: the base DrawioConverter re-exported from
+    # drawio_converter is a 2-arg convert(diagram_type, analysis_data); this
+    # call site passes a third argument (or relies on the 15-type
+    # SUPPORTED_TYPES list), which only the enriched subclass provides.
+    from langgraph_engine.diagrams.drawio.drawio_converter_enriched import DrawioConverter
+    from langgraph_engine.diagrams.drawio_converter import get_shareable_url
 
-    analysis_data = _get_ast_analyzer(project_path)
-    if not analysis_data.get("classes"):
-        analysis_data = _get_call_graph_data(project_path)
+    model_data_map = {}
+    model_data_errors = {}
+    if model_data and model_data.strip():
+        if len(model_data.encode("utf-8")) > _MAX_MODEL_DATA_BYTES:
+            return {
+                "output_dir": "", "generated": [], "failed": [],
+                "total_generated": 0, "total_failed": 0, "model_data_errors": {},
+                "error": "model_data exceeds %d KB limit" % (_MAX_MODEL_DATA_BYTES // 1024),
+            }
+        try:
+            parsed = _json.loads(model_data)
+        except _json.JSONDecodeError as exc:
+            return {
+                "output_dir": "", "generated": [], "failed": [],
+                "total_generated": 0, "total_failed": 0, "model_data_errors": {},
+                "error": "model_data is not valid JSON: %s" % exc.msg,
+            }
+        if not isinstance(parsed, dict):
+            return {
+                "output_dir": "", "generated": [], "failed": [],
+                "total_generated": 0, "total_failed": 0, "model_data_errors": {},
+                "error": "model_data must be a JSON object mapping diagram type slugs to payloads",
+            }
+        for slug, payload in parsed.items():
+            if slug not in _UDM_PRIMARY_KEY:
+                model_data_errors[slug] = "unknown diagram type slug: %s" % slug
+                continue
+            if not isinstance(payload, dict):
+                model_data_errors[slug] = "payload must be a JSON object, got %s" % type(payload).__name__
+                continue
+            primary_key = _UDM_PRIMARY_KEY[slug]
+            if not payload.get(primary_key):
+                model_data_errors[slug] = "must contain a non-empty '%s' list" % primary_key
+                continue
+            model_data_map[slug] = payload
+
+    derived_data = None  # lazily computed only if any type needs it
 
     converter = DrawioConverter()
     od = _resolve_output_dir(project_path, output_dir)
@@ -616,6 +809,17 @@ def generate_all_drawio(
 
     for dtype in DIAGRAM_TYPES_EXTENDED:
         try:
+            if dtype in model_data_map:
+                analysis_data = model_data_map[dtype]
+                source = "model_data"
+            else:
+                if derived_data is None:
+                    derived_data = _get_ast_analyzer(project_path)
+                    if not derived_data.get("classes"):
+                        derived_data = _get_call_graph_data(project_path)
+                analysis_data = derived_data
+                source = "derived"
+
             xml = converter.convert(dtype, analysis_data)
             filename = "%s.drawio" % _canonical_stem(dtype)
             out_path = od / filename
@@ -639,6 +843,7 @@ def generate_all_drawio(
                 "output_file": str(out_path),
                 "shareable_url": url,
                 "file_size_bytes": len(xml.encode("utf-8")),
+                "source": source,
             })
         except Exception as e:
             _LOG.error(
@@ -655,6 +860,7 @@ def generate_all_drawio(
         "failed": failed,
         "total_generated": len(generated),
         "total_failed": len(failed),
+        "model_data_errors": model_data_errors,
         "open_hint": (
             "Open any .drawio file in: draw.io desktop, "
             "https://app.diagrams.net (File > Open from URL / local), "
@@ -799,22 +1005,49 @@ def convert_mermaid_to_drawio(
     output_dir: OutputDir = "",
     github_repo: GithubRepo = "",
     github_branch: GithubBranch = "main",
+    model_data: Annotated[str, Field(
+        description=(
+            "Optional JSON object mapping diagram type slugs to the same UDM "
+            "payloads used to generate the Mermaid files in uml_dir, e.g. "
+            "{\"class\": {\"classes\": [...]}}. Supplying this is how the two "
+            "renderings provably share one source of truth (see "
+            "mcp-drawio-diagram#5) -- without it, a type is regenerated from "
+            "an AST/CallGraph scan of project_path, which is NOT the same "
+            "source as whatever process wrote the Mermaid .md files, and can "
+            "disagree with them silently. A slug missing from the map falls "
+            "back to that scan for that type only. Max 512 KB total."
+        )
+    )] = "",
 ) -> dict:
-    """Re-generate .drawio files for all existing Mermaid UML .md files.
+    """Regenerate .drawio files for the diagram types found in uml_dir's Mermaid set.
 
     Scans the Mermaid output directory for *_diagram.md files (and legacy
-    *-diagram.md files) and re-generates them as .drawio using the same project
-    analysis. Useful for converting an existing Mermaid workflow to draw.io
-    without re-running the full pipeline.
+    *-diagram.md files) to discover which diagram TYPES exist, then renders
+    a .drawio file for each type. Each file is regenerated independently, so
+    one failure is recorded and skipped rather than aborting the run.
 
-    Note: The Mermaid text itself is not parsed -- instead the project is
-    re-analyzed to produce equivalent draw.io diagrams. Each source file is
-    converted independently, so one failure is recorded and skipped rather than
-    aborting the run.
+    IMPORTANT: the Mermaid file CONTENTS are never read or parsed -- only
+    their filenames, to determine which types to (re)generate. Without
+    model_data, each type's .drawio is built from a fresh AST/CallGraph scan
+    of project_path, which has no guaranteed relationship to whatever
+    process produced the Mermaid .md file of the same name (mcp-uml-diagram
+    is one such process, but not the only possible one, and may itself have
+    been called with its own model_data override -- see mcp-uml-diagram#4).
+    Pass model_data with the SAME payload used for the Mermaid generation to
+    guarantee the two outputs describe the same structure.
     """
-    _audit("convert_mermaid_to_drawio", {"project_path": project_path, "uml_dir": uml_dir, "output_dir": output_dir, "github_repo": github_repo})
+    _audit("convert_mermaid_to_drawio", {
+        "project_path": project_path, "uml_dir": uml_dir,
+        "output_dir": output_dir, "github_repo": github_repo,
+        "model_data_bytes": len(model_data or ""),
+    })
     _ensure_scripts_path()
-    from langgraph_engine.diagrams.drawio_converter import DrawioConverter, get_shareable_url
+    # mcp-drawio-diagram#4: the base DrawioConverter re-exported from
+    # drawio_converter is a 2-arg convert(diagram_type, analysis_data); this
+    # call site passes a third argument (or relies on the 15-type
+    # SUPPORTED_TYPES list), which only the enriched subclass provides.
+    from langgraph_engine.diagrams.drawio.drawio_converter_enriched import DrawioConverter
+    from langgraph_engine.diagrams.drawio_converter import get_shareable_url
 
     MERMAID_TYPE_MAP = {
         "class_diagram":                "class",
@@ -837,6 +1070,42 @@ def convert_mermaid_to_drawio(
         "uml_from_code_diagram":        "class",
     }
 
+    model_data_map = {}
+    model_data_errors = {}
+    if model_data and model_data.strip():
+        if len(model_data.encode("utf-8")) > _MAX_MODEL_DATA_BYTES:
+            return {
+                "output_dir": "", "uml_dir": "", "converted": [], "skipped": [],
+                "total_converted": 0, "total_skipped": 0, "model_data_errors": {},
+                "error": "model_data exceeds %d KB limit" % (_MAX_MODEL_DATA_BYTES // 1024),
+            }
+        try:
+            parsed = _json.loads(model_data)
+        except _json.JSONDecodeError as exc:
+            return {
+                "output_dir": "", "uml_dir": "", "converted": [], "skipped": [],
+                "total_converted": 0, "total_skipped": 0, "model_data_errors": {},
+                "error": "model_data is not valid JSON: %s" % exc.msg,
+            }
+        if not isinstance(parsed, dict):
+            return {
+                "output_dir": "", "uml_dir": "", "converted": [], "skipped": [],
+                "total_converted": 0, "total_skipped": 0, "model_data_errors": {},
+                "error": "model_data must be a JSON object mapping diagram type slugs to payloads",
+            }
+        for slug, payload in parsed.items():
+            if slug not in _UDM_PRIMARY_KEY:
+                model_data_errors[slug] = "unknown diagram type slug: %s" % slug
+                continue
+            if not isinstance(payload, dict):
+                model_data_errors[slug] = "payload must be a JSON object, got %s" % type(payload).__name__
+                continue
+            primary_key = _UDM_PRIMARY_KEY[slug]
+            if not payload.get(primary_key):
+                model_data_errors[slug] = "must contain a non-empty '%s' list" % primary_key
+                continue
+            model_data_map[slug] = payload
+
     resolved_uml_dir = (
         os.environ.get("UML_OUTPUT_DIR", "").strip()
         or (uml_dir or "").strip()
@@ -847,9 +1116,7 @@ def convert_mermaid_to_drawio(
         if not Path(resolved_uml_dir).is_absolute()
         else Path(resolved_uml_dir)
     )
-    analysis_data = _get_ast_analyzer(project_path)
-    if not analysis_data.get("classes"):
-        analysis_data = _get_call_graph_data(project_path)
+    derived_data = None  # lazily computed only if some type needs it
 
     converter = DrawioConverter()
     od = _resolve_output_dir(project_path, output_dir)
@@ -869,6 +1136,17 @@ def convert_mermaid_to_drawio(
             continue
 
         try:
+            if dtype in model_data_map:
+                analysis_data = model_data_map[dtype]
+                source = "model_data"
+            else:
+                if derived_data is None:
+                    derived_data = _get_ast_analyzer(project_path)
+                    if not derived_data.get("classes"):
+                        derived_data = _get_call_graph_data(project_path)
+                analysis_data = derived_data
+                source = "derived"
+
             xml = converter.convert(dtype, analysis_data)
             out_filename = "%s.drawio" % _canonical_stem(dtype)
             out_path = od / out_filename
@@ -891,6 +1169,7 @@ def convert_mermaid_to_drawio(
                 "output_drawio": str(out_path),
                 "diagram_type": dtype,
                 "shareable_url": url,
+                "source": source,
             })
         except Exception as e:
             _LOG.error(
@@ -907,6 +1186,7 @@ def convert_mermaid_to_drawio(
         "skipped": skipped,
         "total_converted": len(converted),
         "total_skipped": len(skipped),
+        "model_data_errors": model_data_errors,
     }
 
 
