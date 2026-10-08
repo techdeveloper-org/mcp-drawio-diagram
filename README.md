@@ -7,6 +7,8 @@
 
 Generate fully editable `.drawio` files for all 12 SDLC UML diagram types — no external API, no Graphviz, no rendering service required. Produces pure mxGraph XML that opens directly in draw.io desktop, [app.diagrams.net](https://app.diagrams.net), or VS Code. Also generates shareable `app.diagrams.net` URLs for instant collaboration.
 
+**v29.8.0 (Schema Robustness Update):** DrawioConverter (via claude-workflow-engine) now gracefully handles diverse edge schemas (ssociations, dependencies, links, edges, connections, elationships) and allows generic rom/source and 	o/target key bindings. This makes generate_all_drawio immune to UDM schema drift.
+
 **v29.7.0 (Domain 46 integration):** `DrawioConverter` now uses OMG UML 2.5-compliant mxGraph arrow styles throughout — composition renders as filled diamond (`startArrow=diamond;startFill=1`), aggregation as open diamond (`startArrow=diamond;startFill=0`). The incorrect ERD-style `ERmandOne`/`ERmanyToOne` codes present in pre-v29.7.0 are replaced. RS=1.0 (NLI=1.0, FactScore=1.0, DRE=1.0, Coverage=1.0).
 
 > **How this differs from [mcp-uml-diagram](https://github.com/techdeveloper-org/mcp-uml-diagram):**
