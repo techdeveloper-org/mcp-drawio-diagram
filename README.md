@@ -2,12 +2,12 @@
 
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue)
 ![License MIT](https://img.shields.io/badge/License-MIT-green)
-![Part of claude-workflow-engine](https://img.shields.io/badge/Part%20of-claude--workflow--engine-blueviolet)
+![Part of ai-native-sdlc-engine](https://img.shields.io/badge/Part%20of-claude--workflow--engine-blueviolet)
 ![Domain 46 KG](https://img.shields.io/badge/Domain%2046%20KG-RS%3D1.0-brightgreen)
 
 Generate fully editable `.drawio` files for all 12 SDLC UML diagram types — no external API, no Graphviz, no rendering service required. Produces pure mxGraph XML that opens directly in draw.io desktop, [app.diagrams.net](https://app.diagrams.net), or VS Code. Also generates shareable `app.diagrams.net` URLs for instant collaboration.
 
-**v29.8.0 (Schema Robustness Update):** DrawioConverter (via claude-workflow-engine) now gracefully handles diverse edge schemas (ssociations, dependencies, links, edges, connections, elationships) and allows generic rom/source and 	o/target key bindings. This makes generate_all_drawio immune to UDM schema drift.
+**v29.8.0 (Schema Robustness Update):** DrawioConverter (via ai-native-sdlc-engine) now gracefully handles diverse edge schemas (ssociations, dependencies, links, edges, connections, elationships) and allows generic rom/source and 	o/target key bindings. This makes generate_all_drawio immune to UDM schema drift.
 
 **v29.7.0 (Domain 46 integration):** `DrawioConverter` now uses OMG UML 2.5-compliant mxGraph arrow styles throughout — composition renders as filled diamond (`startArrow=diamond;startFill=1`), aggregation as open diamond (`startArrow=diamond;startFill=0`). The incorrect ERD-style `ERmandOne`/`ERmanyToOne` codes present in pre-v29.7.0 are replaced. RS=1.0 (NLI=1.0, FactScore=1.0, DRE=1.0, Coverage=1.0).
 
@@ -25,7 +25,7 @@ Generate fully editable `.drawio` files for all 12 SDLC UML diagram types — no
 - **Shareable URLs** — generates `app.diagrams.net/?url=` links (GitHub-hosted) or encoded `#H` fragment URLs that work immediately without committing
 - **AST + CallGraph analysis** — analyzes project source code to generate diagrams with real class names, methods, and relationships
 - **Mermaid conversion** — re-generates draw.io equivalents from existing Mermaid `.md` files without re-running the full pipeline
-- **Pipeline integration** — used in Step 13 of the claude-workflow-engine SDLC automation pipeline; output goes to the `drawio/` project directory
+- **Pipeline integration** — used in Step 13 of the ai-native-sdlc-engine SDLC automation pipeline; output goes to the `drawio/` project directory
 
 ---
 
@@ -83,17 +83,17 @@ This installs:
 
 ### 3. Set up the engine dependency
 
-This server analyzes project source code using `langgraph_engine` from the parent `claude-workflow-engine` repository. Ensure that repo is cloned and its `scripts/` directory is on your `PYTHONPATH`:
+This server analyzes project source code using `langgraph_engine` from the parent `ai-native-sdlc-engine` repository. Ensure that repo is cloned and its `scripts/` directory is on your `PYTHONPATH`:
 
 ```bash
-git clone https://github.com/techdeveloper-org/claude-workflow-engine.git
-export PYTHONPATH=/path/to/claude-workflow-engine/scripts:$PYTHONPATH
+git clone https://github.com/techdeveloper-org/ai-native-sdlc-engine.git
+export PYTHONPATH=/path/to/ai-native-sdlc-engine/scripts:$PYTHONPATH
 ```
 
 On Windows (PowerShell):
 
 ```powershell
-$env:PYTHONPATH = "C:\path\to\claude-workflow-engine\scripts;$env:PYTHONPATH"
+$env:PYTHONPATH = "C:\path\to\ai-native-sdlc-engine\scripts;$env:PYTHONPATH"
 ```
 
 ### 4. Configure in Claude Code
@@ -109,7 +109,7 @@ Add the server to your `~/.claude/settings.json`:
         "/path/to/mcp-drawio-diagram/server.py"
       ],
       "env": {
-        "PYTHONPATH": "/path/to/claude-workflow-engine/scripts"
+        "PYTHONPATH": "/path/to/ai-native-sdlc-engine/scripts"
       }
     }
   }
@@ -122,9 +122,9 @@ Add the server to your `~/.claude/settings.json`:
 
 | Environment Variable | Default | Description |
 |----------------------|---------|-------------|
-| `DRAWIO_OUTPUT_DIR` | `drawio/` | Default output directory for generated `.drawio` files when used inside the claude-workflow-engine pipeline (Step 13). Individual tool calls override this with the `output_dir` parameter. |
+| `DRAWIO_OUTPUT_DIR` | `drawio/` | Default output directory for generated `.drawio` files when used inside the ai-native-sdlc-engine pipeline (Step 13). Individual tool calls override this with the `output_dir` parameter. |
 
-When running inside the claude-workflow-engine pipeline, set `DRAWIO_OUTPUT_DIR` to point to the project-root `drawio/` directory:
+When running inside the ai-native-sdlc-engine pipeline, set `DRAWIO_OUTPUT_DIR` to point to the project-root `drawio/` directory:
 
 ```bash
 export DRAWIO_OUTPUT_DIR=/path/to/project/drawio
@@ -208,7 +208,7 @@ Scans `uml/` for `*-diagram.md` files and re-generates `.drawio` equivalents by 
 
 ## Pipeline Integration
 
-`mcp-drawio-diagram` is used in **Step 13** (Documentation Update + UML Diagram Generation) of the [claude-workflow-engine](https://github.com/techdeveloper-org/claude-workflow-engine) LangGraph pipeline.
+`mcp-drawio-diagram` is used in **Step 13** (Documentation Update + UML Diagram Generation) of the [ai-native-sdlc-engine](https://github.com/techdeveloper-org/ai-native-sdlc-engine) LangGraph pipeline.
 
 ```
 Step 13: Documentation Update
@@ -229,7 +229,7 @@ This server is one of 13 MCP servers in the **Claude Workflow Engine** ecosystem
 
 | Related Repo | Purpose |
 |---|---|
-| [claude-workflow-engine](https://github.com/techdeveloper-org/claude-workflow-engine) | Main pipeline — LangGraph orchestration, 8 active steps, call graph intelligence |
+| [ai-native-sdlc-engine](https://github.com/techdeveloper-org/ai-native-sdlc-engine) | Main pipeline — LangGraph orchestration, 8 active steps, call graph intelligence |
 | [mcp-base](https://github.com/techdeveloper-org/mcp-base) | Shared base package — `MCPResponse` builder, `@mcp_tool_handler` decorator, `AtomicJsonStore`, `LazyClient` |
 | [mcp-uml-diagram](https://github.com/techdeveloper-org/mcp-uml-diagram) | Sibling diagram server — 13 diagram types, Kroki.io rendering, Mermaid/PlantUML, image output |
 

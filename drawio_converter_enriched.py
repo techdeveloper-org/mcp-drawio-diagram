@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 _scripts_dir = str(
-    Path(__file__).resolve().parent.parent.parent / "claude-workflow-engine"
+    Path(__file__).resolve().parent.parent.parent / "ai-native-sdlc-engine"
 )
 if _scripts_dir not in sys.path:
     sys.path.insert(0, _scripts_dir)

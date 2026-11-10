@@ -321,8 +321,9 @@ def _engine_root_candidates():
     """Return the candidate directories that may contain ``langgraph_engine``.
 
     Ordered most-specific first: explicit environment overrides, then the
-    sibling claude-workflow-engine checkout (where the package lives at the
-    repository root), then its legacy ``scripts/`` location.
+    sibling ai-native-sdlc-engine checkout (where the package lives at the
+    repository root), then its legacy ``scripts/`` location and the pre-rename
+    claude-workflow-engine directory name.
 
     Returns:
         List of Path objects, in probe order.
@@ -330,11 +331,17 @@ def _engine_root_candidates():
     here = Path(__file__).resolve().parent
     workspace = here.parent
     candidates = []
-    for var in ("CLAUDE_WORKFLOW_ENGINE_PATH", "WORKFLOW_ENGINE_PATH"):
+    for var in (
+        "AI_NATIVE_SDLC_ENGINE_PATH",
+        "CLAUDE_WORKFLOW_ENGINE_PATH",
+        "WORKFLOW_ENGINE_PATH",
+    ):
         raw = os.environ.get(var, "").strip()
         if raw:
             candidates.append(Path(raw))
             candidates.append(Path(raw) / "scripts")
+    candidates.append(workspace / "ai-native-sdlc-engine")
+    candidates.append(workspace / "ai-native-sdlc-engine" / "scripts")
     candidates.append(workspace / "claude-workflow-engine")
     candidates.append(workspace / "claude-workflow-engine" / "scripts")
     candidates.append(workspace.parent / "scripts")
@@ -342,7 +349,7 @@ def _engine_root_candidates():
 
 
 def _scripts_dir():
-    """Return the resolved claude-workflow-engine root, or the first candidate.
+    """Return the resolved ai-native-sdlc-engine root, or the first candidate.
 
     Returns:
         Path to the directory that contains ``langgraph_engine``, or the first
@@ -355,7 +362,7 @@ def _scripts_dir():
 
 
 def _ensure_scripts_path():
-    """Put the claude-workflow-engine root on sys.path.
+    """Put the ai-native-sdlc-engine root on sys.path.
 
     Only a directory that actually contains ``langgraph_engine/__init__.py`` is
     added, so a stale or renamed checkout produces an explicit failure instead
@@ -372,7 +379,7 @@ def _ensure_scripts_path():
             return candidate
     _LOG.warning(
         "langgraph_engine not found in any known location: %s. "
-        "Set CLAUDE_WORKFLOW_ENGINE_PATH to the claude-workflow-engine checkout.",
+        "Set AI_NATIVE_SDLC_ENGINE_PATH to the ai-native-sdlc-engine checkout.",
         ", ".join(str(c) for c in _engine_root_candidates()),
     )
     return None
@@ -606,7 +613,7 @@ def generate_drawio_diagram(
         output_dir: Output directory (relative to project root, or absolute).
                     Default: docs/drawio
         github_repo: Optional "owner/repo" for shareable GitHub URL.
-                     E.g. "techdeveloper-org/claude-workflow-engine"
+                     E.g. "techdeveloper-org/ai-native-sdlc-engine"
         github_branch: Branch for GitHub raw URL. Default: "main"
         use_rich_styles: When True, apply complexity-based color coding via
                          RICH_STYLE_CONFIG. Default False = backward-compatible

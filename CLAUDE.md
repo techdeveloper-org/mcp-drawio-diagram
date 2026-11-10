@@ -43,12 +43,12 @@ Run via `python server.py` — communicates over stdio using the MCP protocol.
 
 ## Engine Dependency
 
-Depends on scripts/langgraph_engine/diagrams/ package and call_graph_builder.py from claude-workflow-engine.
+Depends on scripts/langgraph_engine/diagrams/ package and call_graph_builder.py from ai-native-sdlc-engine.
 
 Set PYTHONPATH to include the workflow engine scripts directory before running:
 
 ```bash
-export PYTHONPATH=/path/to/claude-workflow-engine/scripts:$PYTHONPATH
+export PYTHONPATH=/path/to/ai-native-sdlc-engine/scripts:$PYTHONPATH
 ```
 
 ---
